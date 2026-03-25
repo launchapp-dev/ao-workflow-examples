@@ -1,0 +1,228 @@
+tools_allowlist:
+  - git
+  - gh
+  - ao
+  - node
+  - npx
+  - npm
+  - curl
+  - jq
+  - WebSearch
+  - WebFetch
+
+mcp_servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+  sequential-thinking:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+  firecrawl:
+    command: npx
+    args: ["-y", "firecrawl-mcp"]
+  playwright:
+    command: npx
+    args: ["-y", "@playwright/mcp"]
+  railway:
+    command: npx
+    args: ["-y", "@railway/mcp-server"]
+
+agents:
+  conductor:
+    system_prompt: |
+      You are the brain's conductor — the always-on orchestrator that keeps
+      the entire AI workforce productive.
+
+      ## 1. SCAN — What changed?
+      - Check recent commits: gh search commits --owner <org> --committer-date ">$(date -v-1d +%Y-%m-%d)" --limit 20
+      - Check new/updated issues: gh search issues --owner <org> --state open --sort updated --limit 10
+      - Check open PRs: gh search prs --owner <org> --state open --limit 10
+      - Check AO task list and queue: ao.task.list and ao.queue.list
+
+      ## 2. COMPARE — Is knowledge stale?
+      - Product docs vs actual repo activity (>7 days = stale)
+      - Architecture diagrams vs code structure (>14 days = stale)
+      - Competitive info (>14 days = stale)
+      - Questions with status:answered that need action extraction
+
+      ## 3. DISPATCH — Queue the right work
+      STRICT DEDUPLICATION: Before creating ANY task, check ao.task.list
+      and ao.workflow.list. Never create if:
+      - A task for that workflow already exists (backlog/ready/in-progress/blocked)
+      - A workflow for that ref is already running or paused
+      - A task failed within the last 60 minutes (prevents re-dispatch loops)
+
+      Available workflows and triggers:
+      | Workflow              | When to queue                                        |
+      |----------------------|------------------------------------------------------|
+      | product-catalog      | New repo appeared, or docs stale (>7 days)           |
+      | knowledge-update     | Significant commits not reflected in knowledge/      |
+      | architecture-diagrams| Code structure changed, diagrams >14 days old        |
+      | competitive-research | Competitor info >14 days old                         |
+      | sdk-audit            | SDK versions changed or new SDK added                |
+      | template-sync        | Template merged PR that others don't have            |
+      | quality-audit        | Repo had >5 PRs merged in 7 days                    |
+      | fleet-management     | Daemon crashed or repo needs AO setup                |
+      | generate-questions   | Knowledge base grew significantly                    |
+      | extract-actions      | Questions answered but no actions extracted           |
+
+      ## 4. UNBLOCK — Fix stale tasks (NEVER cancel)
+      - Stuck in 'ready' >1 hour → re-enqueue or decompose
+      - Failed 3+ times → queue decompose
+      - NEVER cancel — decompose instead
+
+      ## 5. RATE LIMIT
+      - If queue has >10 pending items, don't add more
+      - Create 1-3 tasks per cycle max
+      - Skip if nothing meaningful changed
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  issue-triager:
+    system_prompt: |
+      You scan all repos for new/unlabeled issues and classify them.
+      For each unlabeled issue:
+      1. Read the title and body
+      2. Assign priority: P0-critical, P1-high, P2-medium, P3-low
+      3. Assign category: bug, feature, chore, docs, security
+      4. If P0 or P1, create an AO task for it
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  pr-reviewer-org:
+    system_prompt: |
+      You review open PRs across all repos for quality and security.
+      1. Find open PRs across the org
+      2. Fetch diff, check CI status
+      3. Review for correctness, security, style, missing tests
+      4. Approve+merge if good, request changes if issues found
+      Never merge PRs with failing CI.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  security-monitor:
+    system_prompt: |
+      You monitor security across the org.
+      Check for: dependabot alerts, known CVEs, outdated critical deps.
+      Aggregate by severity. Create AO tasks for critical CVEs.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  competitive-researcher:
+    system_prompt: |
+      You conduct competitive research for the org's products.
+      1. Use WebSearch for recent news, releases, announcements
+      2. Track pricing changes, new features, funding rounds
+      3. Identify gaps and advantages
+      4. Note emerging players
+      Write findings to knowledge/competitive/ directory.
+    model: claude-haiku-4-5
+    tool: claude
+    web_search: true
+    mcp_servers: ["ao", "github", "firecrawl", "playwright"]
+
+  knowledge-curator:
+    system_prompt: |
+      You maintain the org-wide knowledge base.
+      Review recent changes (last 7 days), update:
+      - architecture.md — org-wide overview
+      - repo-inventory.md — all repos with purpose and status
+      - active-workstreams.md — current initiatives
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github", "context7"]
+
+phases:
+  conduct:
+    mode: agent
+    agent: conductor
+    directive: "Run the scan → compare → dispatch cycle. Max 3 tasks per cycle."
+    capabilities:
+      mutates_state: true
+
+  scan-org-issues:
+    mode: agent
+    agent: issue-triager
+    directive: "Scan all repos for unlabeled issues. Classify and label them."
+
+  scan-org-prs:
+    mode: agent
+    agent: pr-reviewer-org
+    directive: "Find and review open PRs across the org."
+
+  check-security:
+    mode: agent
+    agent: security-monitor
+    directive: "Check for security vulnerabilities across the org."
+
+  research-competitors:
+    mode: agent
+    agent: competitive-researcher
+    directive: "Research competitor updates and market changes."
+
+  update-knowledge:
+    mode: agent
+    agent: knowledge-curator
+    directive: "Update knowledge base with recent org changes."
+    capabilities:
+      mutates_state: true
+
+workflows:
+  - id: conductor
+    name: Conductor Cycle
+    description: Scan → Compare → Dispatch
+    phases:
+      - conduct
+
+  - id: org-issue-triage
+    name: Org Issue Triage
+    description: Scan and label issues across all repos
+    phases:
+      - scan-org-issues
+
+  - id: org-pr-review
+    name: Org PR Review
+    description: Review open PRs across all repos
+    phases:
+      - scan-org-prs
+
+  - id: security-scan
+    name: Security Scan
+    description: Monitor security across the org
+    phases:
+      - check-security
+
+  - id: competitive-research
+    name: Competitive Research
+    description: Research competitor updates
+    phases:
+      - research-competitors
+
+  - id: knowledge-update
+    name: Knowledge Update
+    description: Update org knowledge base
+    phases:
+      - update-knowledge
+
+schedules:
+  - id: conductor
+    cron: "*/20 * * * *"     # Every 20 minutes
+    workflow_ref: conductor
+    enabled: true
+
+  - id: org-issue-triage
+    cron: "37 */2 * * *"     # Every 2 hours
+    workflow_ref: org-issue-triage
+    enabled: true
+
+  - id: competitive-research
+    cron: "0 10 * * 1,4"     # Monday + Thursday at 10am
+    workflow_ref: competitive-research
+    enabled: true

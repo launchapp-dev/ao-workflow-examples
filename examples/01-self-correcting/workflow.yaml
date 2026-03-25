@@ -1,0 +1,265 @@
+tools_allowlist:
+  - npm
+  - npx
+  - node
+  - gh
+  - git
+  - pnpm
+
+mcp_servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+agents:
+  implementer:
+    system_prompt: |
+      You implement code changes for a TypeScript monorepo.
+      Write clean, type-safe code. Follow existing patterns.
+      Before committing, run pnpm build to verify nothing is broken.
+      Commit changes with descriptive messages.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  reviewer:
+    system_prompt: |
+      You review and merge PRs autonomously.
+
+      ## TRIAGE (decide review depth)
+
+      FAST-PATH AUTO-MERGE (no deep review needed):
+      - Dependencies-only PR (package.json/pnpm-lock changes only) → merge
+      - Documentation-only PR (.md files, comments, README) → merge
+      - Empty diff (0 additions + 0 deletions) → close with comment
+
+      FAST-PATH CLOSE:
+      - PR is CONFLICTING → check rebase attempts.
+        If rebased 3+ times and still conflicting, CLOSE.
+      - PR is older than 24 hours and still CONFLICTING → CLOSE immediately
+
+      ## DEEP REVIEW
+
+      Use get_pull_request_files MCP tool to read the diff.
+
+      BLOCKING (must fix before merge):
+      - Security: hardcoded secrets, SQL injection, XSS
+      - Broken imports: referencing packages that don't exist
+      - Missing exports: new code not exported from package index.ts
+
+      ## VERDICT
+
+      MERGE: No BLOCKING issues
+      → merge_pull_request, mark task done
+
+      REQUEST CHANGES: BLOCKING issues found
+      → Leave comment, queue rework workflow
+      → Do NOT close the PR — rework will push fixes to the same branch
+
+      CLOSE: Stale, conflicting (3+ rebases), or task cancelled
+      → Close PR, queue decompose workflow
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  decomposer:
+    system_prompt: |
+      You decompose complex or failing tasks into smaller subtasks.
+      A task was sent to you because it failed 3+ times or is too complex.
+
+      PROCESS:
+      1. Read the task via ao.task.get — understand the full scope
+      2. Read ao.workflow.list for past runs — understand WHY it failed
+      3. Break into 2-4 focused subtasks:
+         - Each completable in a single agent session
+         - Each touches at most 2-3 files
+         - Subtasks can depend on each other (use blocked_by)
+         - Each needs clear acceptance criteria
+      4. Create subtasks via ao.task.create. Set each to "ready".
+      5. Set PARENT to "blocked" with reason "Decomposed into: TASK-X, TASK-Y"
+
+      RULES:
+      - NEVER cancel the parent task
+      - NEVER create more than 4 subtasks
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao"]
+
+  reconciler:
+    system_prompt: |
+      You maintain task and workflow state consistency.
+      Your goal is to keep tasks FLOWING — never cancel, always unblock or decompose.
+
+      ON EACH RUN:
+
+      1. UNBLOCK TASKS:
+         ao.task.list status "blocked". For each:
+         - Decomposed parents: check if ALL subtasks are "done". If yes → done.
+         - Dependency blocks: check if ALL blocked_by are "done"/"cancelled" → ready.
+         - Merged PR exists → done.
+
+      2. PROMOTE BACKLOG:
+         ao.task.list status "backlog". Set to "ready" if all deps met.
+
+      3. RE-ROUTE FAILED:
+         - Failed 3+ times → queue decompose workflow
+         - Failed once/twice → set back to "ready" for retry
+
+      4. CLEAN STALE QUEUE:
+         "assigned" entries older than 30 min with no active workflow → drop.
+
+      5. MARK DONE:
+         Tasks with merged PRs → set to "done".
+
+      RULES:
+      - Cancel ONLY for duplicates or conflicts. Note the reason.
+      - NEVER cancel for being "stuck" or "stale" — decompose instead.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+phases:
+  # --- Implementation ---
+  implementation:
+    mode: agent
+    agent: implementer
+    directive: Implement the task requirements. Write code, commit with task ID.
+    capabilities:
+      mutates_state: true
+
+  # --- Git Operations ---
+  push-branch:
+    mode: command
+    directive: Push the current branch to origin
+    command:
+      program: git
+      args: ["push", "-u", "origin", "HEAD"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  create-pr:
+    mode: command
+    directive: Create a GitHub PR from the current branch
+    command:
+      program: gh
+      args: ["pr", "create", "--fill", "--base", "main"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  force-push:
+    mode: command
+    directive: Force push rebased branch
+    command:
+      program: git
+      args: ["push", "--force-with-lease", "origin", "HEAD"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  # --- Review ---
+  pr-review:
+    mode: agent
+    agent: reviewer
+    directive: |
+      Review the PR. Check mergeable status first.
+      If CONFLICTING → queue rebase-and-retry. EXIT.
+      If MERGEABLE → review diff against acceptance criteria.
+      Approve+merge or request changes.
+
+  # --- Self-Correction Phases ---
+  rebase-on-main:
+    mode: agent
+    agent: implementer
+    directive: |
+      This branch has merge conflicts. Rebase onto latest main.
+      CRITICAL: DO NOT LOSE ANY WORK. Keep BOTH sides of every conflict.
+      For pnpm-lock.yaml: accept theirs, then run pnpm install.
+      For code files: integrate both changes.
+      Run pnpm build to verify the project still compiles.
+    capabilities:
+      mutates_state: true
+
+  address-review:
+    mode: agent
+    agent: implementer
+    directive: |
+      A reviewer requested changes on this PR. Address the feedback.
+      1. Read review comments from the PR
+      2. Make the requested code changes
+      3. Commit with a message referencing the review
+      4. Verify pnpm build still passes
+    capabilities:
+      mutates_state: true
+
+  decompose:
+    mode: agent
+    agent: decomposer
+    directive: |
+      This task failed 3+ times or is too complex.
+      Break it into 2-4 smaller subtasks. Never cancel the parent.
+    capabilities:
+      mutates_state: true
+
+  reconciliation:
+    mode: agent
+    agent: reconciler
+    directive: |
+      Unblock tasks whose deps are met. Promote backlog to ready.
+      Route 3x-failed tasks to decompose. Clean stale queue entries.
+      Mark tasks with merged PRs as done. NEVER cancel tasks.
+
+# --- Workflows ---
+workflows:
+  # Standard flow with rework loop
+  - id: standard
+    name: Standard Task Workflow
+    description: Implement → Build → Push → PR → Review (with rework loop)
+    phases:
+      - implementation
+      - push-branch
+      - create-pr
+      - pr-review:
+          on_verdict:
+            rework:
+              target: implementation
+
+  # Rework: address reviewer feedback and re-review
+  - id: rework
+    name: Rework
+    description: Address reviewer feedback, push fixes, re-review
+    phases:
+      - address-review
+      - force-push
+      - pr-review
+
+  # Rebase conflicting branches
+  - id: rebase-and-retry
+    name: Rebase and Retry
+    description: Rebase conflicting branch on main, force push, re-review
+    phases:
+      - rebase-on-main
+      - force-push
+      - pr-review
+
+  # Decompose complex/failing tasks
+  - id: decompose
+    name: Task Decomposition
+    description: Break complex/failing tasks into smaller subtasks
+    phases:
+      - decompose
+
+  # State reconciliation (runs on cron)
+  - id: task-reconciler
+    name: Task Reconciler
+    description: Fix stale state and unblock tasks
+    phases:
+      - reconciliation
+
+# --- Schedules ---
+schedules:
+  - id: task-reconciler
+    cron: "2-59/10 * * * *"   # Every 10 minutes
+    workflow_ref: task-reconciler
+    enabled: true

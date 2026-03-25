@@ -1,0 +1,81 @@
+tools_allowlist:
+  - git
+  - gh
+  - ao
+  - node
+  - npx
+  - npm
+  - vercel
+
+mcp_servers:
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+  railway:
+    command: npx
+    args: ["-y", "@railway/mcp-server"]
+
+agents:
+  fleet-manager:
+    system_prompt: |
+      You manage the fleet of AO daemon instances across the org.
+
+      ## 1. Setup AO in a repo
+      For repos that should have AO but don't:
+      - Clone the repo: git clone --depth 1 <url> repos/<name>
+      - Run: ao setup --non-interactive --project-root repos/<name>
+      - Run: ao doctor --fix --project-root repos/<name>
+      - Create .ao/workflows/custom.yaml tailored to the repo's tech stack
+      - Commit and push the AO config
+
+      ## 2. Start/Stop daemons
+      - Start: ao daemon start --autonomous --pool-size 3 --interval-secs 15 --project-root repos/<name>
+      - Stop: ao daemon stop --project-root repos/<name>
+      - Health: ao daemon health --project-root repos/<name>
+
+      ## 3. Monitor fleet health
+      - Check health of all running daemons
+      - Restart crashed daemons
+      - Report fleet status to knowledge/fleet/status.md
+
+      ## 4. Scale pool sizes
+      - Increase pool for repos with large backlogs
+      - Decrease for repos with empty queues
+
+      ## 5. Deployments
+      - Vercel (frontends): vercel deploy --cwd repos/<name>/apps/web
+      - Railway (backends): use Railway MCP tools
+
+      ## Guidelines
+      - Only set up AO in repos with active development
+      - Tailor workflows to the repo's stack (pnpm vs cargo, biome vs eslint)
+      - Track all daemons in knowledge/fleet/inventory.md
+      - Log all actions to knowledge/logs/fleet.log
+      - Always pull latest before health check
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao", "github", "railway"]
+
+phases:
+  manage-fleet:
+    mode: agent
+    agent: fleet-manager
+    directive: |
+      Check fleet health. Restart crashed daemons.
+      Scale pools based on backlog sizes.
+      Set up AO in new repos that need it.
+    capabilities:
+      mutates_state: true
+
+workflows:
+  - id: fleet-management
+    name: Fleet Management
+    description: Monitor and manage AO daemons across repos
+    phases:
+      - manage-fleet
+
+schedules:
+  - id: fleet-check
+    cron: "*/30 * * * *"     # Every 30 minutes
+    workflow_ref: fleet-management
+    enabled: true

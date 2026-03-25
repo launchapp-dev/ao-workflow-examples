@@ -1,0 +1,258 @@
+tools_allowlist:
+  - git
+  - gh
+  - node
+  - npx
+  - curl
+  - jq
+
+mcp_servers:
+  # Core universe database — validates all reads/writes
+  storyforge:
+    command: node
+    args: ["mcp-servers/storyforge/src/index.ts"]
+  # AI image generation gateway
+  replicate:
+    command: node
+    args: ["mcp-servers/replicate/src/index.ts"]
+  # Voice, music, SFX generation
+  audio:
+    command: node
+    args: ["mcp-servers/audio/src/index.ts"]
+  # Panel compositing and episode assembly
+  assembly:
+    command: node
+    args: ["mcp-servers/assembly/src/index.ts"]
+  # Human review queue management
+  review:
+    command: node
+    args: ["mcp-servers/review/src/index.ts"]
+
+agents:
+  world-builder:
+    system_prompt: |
+      You create worlds, locations, and world systems for serialized fiction.
+      You establish the rules that every other agent must follow.
+
+      All entities created through storyforge MCP tools — never freestyle.
+      Rules as structured JSON (what's possible, what's forbidden).
+      Limitations make worlds compelling — define what CANNOT happen.
+      Systems should interact: magic affects politics, economics, military.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  character-designer:
+    system_prompt: |
+      You design characters with profiles, relationships, and voice styles.
+      Each character needs: appearance (for image gen), personality, backstory,
+      motivations, voice/speech patterns, character arc, relationships.
+      All data via storyforge.create_character() and storyforge.create_relationship().
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  arc-planner:
+    system_prompt: |
+      You plan narrative structure (Three-Act, Hero's Journey, etc.).
+      Track plot beats, foreshadowing, timeline management.
+      Create via storyforge.create_arc() with setup, rising action,
+      climax, resolution, plot_points array, foreshadowing tracking.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  episode-writer:
+    system_prompt: |
+      You write panel-by-panel scripts with dialogue, camera angles, and mood.
+      Query character knowledge and continuity BEFORE writing.
+      You CANNOT make up facts — everything comes from the database.
+
+      Each panel includes:
+      - scene_description: visual action, lighting, weather
+      - camera_angle: close-up, wide-shot, dutch-angle, etc.
+      - mood: tense, romantic, chaotic, peaceful, etc.
+      - dialogue: array of character lines with delivery notes
+      - narration: caption box text
+      - layout_position: full-page, half-page, third, quarter, strip
+
+      Every write_panel() call is validated by the MCP server.
+      Character knowledge violations, world rule violations,
+      and voice inconsistencies are REJECTED. Fix and resubmit.
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  # Genre-specialized writers
+  episode-writer-action:
+    system_prompt: |
+      Specialized writer for action sequences.
+      Fast pacing, small panels, dynamic camera angles.
+    model: gemini-2.5-pro
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  episode-writer-horror:
+    system_prompt: |
+      Specialized writer for horror — deep psychology, dread, atmosphere.
+      Slow builds, oppressive atmosphere, unreliable perspectives.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  script-reviewer:
+    system_prompt: |
+      Check for: continuity violations, character voice consistency,
+      world rule violations, plot coherence, pacing issues.
+      Set episode status to "illustrating" (pass) or "scripting" (rework).
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["storyforge"]
+
+  art-director:
+    system_prompt: |
+      Translate scripts into image prompts combining:
+      - art_style.base_prompt_prefix (visual DNA of the series)
+      - scene description + character descriptions
+      - camera angle as composition language
+      - lighting, mood, color palette, composition notes
+      - negative prompt (deformed hands, watermarks, etc.)
+      Store via storyforge.update_panel(panel_id, image_prompt=...).
+    model: gemini-2.5-pro
+    tool: claude
+    mcp_servers: ["storyforge", "replicate"]
+
+  quality-reviewer:
+    system_prompt: |
+      Final QA checks:
+      - Art consistency (same series, recognizable characters)
+      - Layout & readability (panel order, speech bubbles)
+      - Audio quality (dialogue sync, music timing)
+      - Story flow (natural progression)
+      - Completeness (every panel has image, every dialogue has audio)
+      Submit to human review or kick back to appropriate phase.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["storyforge", "review"]
+
+phases:
+  build-world:
+    mode: agent
+    agent: world-builder
+    directive: "Create a new world based on the task brief. Include: world name, genre, tone, setting, art style, 3-5 locations, 1+ world system, lore entries."
+
+  create-characters:
+    mode: agent
+    agent: character-designer
+    directive: "Design cast: 1 protagonist, 1 antagonist, 2-3 supporting. Create profiles, relationships, character_sheet_prompts."
+
+  plan-season:
+    mode: agent
+    agent: arc-planner
+    directive: "Create season via storyforge.create_season(). Main arc with plot points, subplots, character arcs, foreshadowing tracking."
+
+  outline-episode:
+    mode: agent
+    agent: episode-writer
+    directive: "Query continuity, active arcs, previous episode. Create episode with scene-by-scene outline, set status to 'scripting'."
+
+  write-script:
+    mode: agent
+    agent: episode-writer
+    directive: "Write 15-25 panels. Query world, episode outline, character knowledge, relationships. Validate each panel, fix on rejection."
+    capabilities:
+      mutates_state: true
+
+  script-review:
+    mode: agent
+    agent: script-reviewer
+    directive: "Check continuity, voice, pacing, world rules. Set status to 'illustrating' (pass) or 'scripting' (rework)."
+
+  art-direction:
+    mode: agent
+    agent: art-director
+    directive: "For each panel: combine art_style prefix + scene + characters + camera + lighting + mood + color. Store image_prompt."
+    capabilities:
+      mutates_state: true
+
+  generate-images:
+    mode: agent
+    agent: art-director
+    directive: "Generate images via replicate MCP for all panels with image prompts."
+    capabilities:
+      mutates_state: true
+
+  generate-audio:
+    mode: agent
+    agent: episode-writer
+    directive: "Generate dialogue audio, background music, and SFX for all panels."
+    capabilities:
+      mutates_state: true
+
+  assemble-episode:
+    mode: agent
+    agent: quality-reviewer
+    directive: "Composite panels into episode format. Add speech bubbles, layout, motion effects."
+    capabilities:
+      mutates_state: true
+
+  quality-check:
+    mode: agent
+    agent: quality-reviewer
+    directive: "Check art consistency, layout, audio sync, story flow, completeness. Submit for review or kick back."
+
+workflows:
+  # Bootstrap a new series from scratch
+  - id: create-world
+    name: Create World
+    description: Build world → characters → season plan
+    phases:
+      - build-world
+      - create-characters
+      - plan-season
+
+  # Full episode production
+  - id: produce-episode
+    name: Produce Episode
+    description: Full pipeline from outline to final QA
+    phases:
+      - outline-episode
+      - write-script
+      - script-review
+      - art-direction
+      - generate-images
+      - generate-audio
+      - assemble-episode
+      - quality-check
+
+  # Writing only (no visuals)
+  - id: produce-script
+    name: Produce Script
+    description: Writing only — no visual production
+    phases:
+      - outline-episode
+      - write-script
+      - script-review
+
+  # Visual production (script exists)
+  - id: produce-visuals
+    name: Produce Visuals
+    description: Visual production assuming script exists
+    phases:
+      - art-direction
+      - generate-images
+      - assemble-episode
+      - quality-check
+
+schedules:
+  # Bulk produce episodes every 4 hours
+  - id: bulk-produce
+    cron: "0 */4 * * *"
+    workflow_ref: produce-episode
+    enabled: false  # Enable when series is bootstrapped
+
+  # New series every Monday
+  - id: new-series-weekly
+    cron: "0 9 * * 1"
+    workflow_ref: create-world
+    enabled: false

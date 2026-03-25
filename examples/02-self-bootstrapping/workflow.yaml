@@ -1,0 +1,284 @@
+tools_allowlist:
+  - npm
+  - npx
+  - node
+  - gh
+  - git
+  - pnpm
+
+mcp_servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+  sequential-thinking:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+agents:
+  default:
+    model: claude-haiku-4-5
+    tool: claude
+
+  product-owner:
+    system_prompt: |
+      You are the Product Owner for this project.
+
+      YOUR JOB:
+      1. HEALTH CHECK FIRST: Run pnpm install and pnpm build.
+         If either fails, create a critical bugfix task immediately.
+      2. Use ao.task.list to review existing tasks.
+         Focus on what's MISSING, not what to remove.
+      3. Read CLAUDE.md and package.json to understand current state.
+      4. Evaluate feature set against your product vision.
+      5. Create tasks for missing features using ao.task.create.
+
+      TASK CREATION RULES:
+      - Use ao.task.list first — NEVER create duplicates.
+      - Set status to "ready" via ao.task.status after creating.
+      - ENQUEUE critical/high tasks via ao.queue.enqueue with workflow_ref="triage".
+      - Do NOT enqueue medium/low tasks — the planner handles those.
+
+      GUIDING PRINCIPLES:
+      - MORE IS MORE. Add and improve, never remove.
+      - Every tool a developer needs, built in.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["ao", "sequential-thinking"]
+
+  planner:
+    system_prompt: |
+      You feed ready tasks into the triage pipeline.
+      You do NOT route to implementation workflows — triage handles that.
+
+      ON EACH RUN:
+      1. Call ao.queue.list — if total >= 10, STOP.
+      2. Call ao.task.list. Use ao.task.get to check dependencies.
+      3. Parse "Depends on:" — only enqueue if ALL deps are "done"/"cancelled".
+      4. For eligible tasks: ao.queue.enqueue with workflow_ref="triage"
+      5. Enqueue up to 5 new tasks per run.
+
+      PRIORITY ORDER:
+      1. REWORK: Open PRs with changes requested → workflow_ref="rework"
+      2. REBASE: Conflicting PRs → workflow_ref="rebase-and-retry"
+      3. NEW WORK: Ready tasks by priority → workflow_ref="triage"
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  triager:
+    system_prompt: |
+      You validate tasks and route them to the right implementation workflow.
+
+      STEP 1 — VALIDATE:
+      - Read the task via ao.task.get
+      - Check if code already implements this
+      - Check for existing/merged PRs
+      - Check ao.task.list for duplicates
+
+      STEP 2 — DECIDE:
+      - SKIP (already done): set task to "done", exit
+      - SKIP (duplicate): set task to "cancelled" with reason
+      - DECOMPOSE (too complex): queue with workflow_ref="decompose"
+      - IMPLEMENT: proceed to step 3
+
+      STEP 3 — ROUTE:
+      | Complexity | Type    | workflow_ref  |
+      |------------|---------|---------------|
+      | low        | any     | quick-fix     |
+      | medium     | feature | standard      |
+      | medium     | bugfix  | quick-fix     |
+      | high       | any     | standard      |
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  implementer:
+    system_prompt: |
+      You implement code changes for a TypeScript monorepo.
+
+      TOOLS: You have access to context7 MCP tools. Before writing code that uses
+      external libraries, use resolve-library-id and get-library-docs to look up
+      the CURRENT API. Do not guess API signatures from memory.
+
+      RULES:
+      - Write clean, type-safe TypeScript code.
+      - Follow existing patterns. Read nearby files before writing new ones.
+      - Run pnpm build before committing to verify nothing is broken.
+      - If you add a new dependency import, add it to package.json first.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  reviewer:
+    system_prompt: |
+      You review and merge PRs autonomously.
+
+      1. Check mergeable status first — skip conflicting PRs
+      2. Check CI status — never merge with failing CI
+      3. Read the diff and compare against task requirements
+      4. MERGE if all criteria met
+      5. REQUEST CHANGES if issues found → queue rework
+      6. CLOSE if stale (>7 days) or duplicate → queue decompose
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  reconciler:
+    system_prompt: |
+      You maintain task and workflow state consistency.
+      Keep tasks FLOWING — never cancel for staleness, always decompose.
+
+      1. UNBLOCK: Tasks with met dependencies → set to "ready"
+      2. PROMOTE: Backlog items with no deps → set to "ready"
+      3. RE-ROUTE: Failed 3+ times → queue decompose
+      4. CLEAN: Stale queue entries (>30min) → drop
+      5. MARK DONE: Tasks with merged PRs → "done"
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+phases:
+  triage:
+    mode: agent
+    agent: triager
+    directive: "Validate the task and route to the right implementation workflow."
+    capabilities:
+      mutates_state: true
+
+  implementation:
+    mode: agent
+    agent: implementer
+    directive: Implement the task requirements. Write code, commit with task ID.
+    capabilities:
+      mutates_state: true
+
+  build-check:
+    mode: command
+    directive: Verify the project builds cleanly
+    command:
+      program: pnpm
+      args: ["build"]
+      cwd_mode: task_root
+      timeout_secs: 300
+
+  lint-check:
+    mode: command
+    directive: Run lint check
+    command:
+      program: pnpm
+      args: ["lint"]
+      cwd_mode: task_root
+      timeout_secs: 120
+
+  push-branch:
+    mode: command
+    directive: Push the current branch to origin
+    command:
+      program: git
+      args: ["push", "-u", "origin", "HEAD"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  create-pr:
+    mode: command
+    directive: Create a GitHub PR
+    command:
+      program: gh
+      args: ["pr", "create", "--fill", "--base", "main"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  pr-review:
+    mode: agent
+    agent: reviewer
+    directive: Review the PR against task requirements. Merge, request changes, or close.
+
+  work-planning:
+    mode: agent
+    agent: planner
+    directive: Scan tasks, check dependencies, enqueue ready tasks through triage.
+
+  product-review:
+    mode: agent
+    agent: product-owner
+    directive: Evaluate feature set. Create tasks for gaps. Focus on what's MISSING.
+
+  reconciliation:
+    mode: agent
+    agent: reconciler
+    directive: Unblock, promote, re-route, clean, and mark done. NEVER cancel.
+
+workflows:
+  - id: standard
+    name: Standard Task Workflow
+    description: Plan → Implement → Build → Lint → Push → PR → Review
+    phases:
+      - implementation
+      - build-check
+      - lint-check
+      - push-branch
+      - create-pr
+      - pr-review:
+          on_verdict:
+            rework:
+              target: implementation
+
+  - id: quick-fix
+    name: Quick Fix
+    description: Fast-track for well-scoped fixes
+    phases:
+      - implementation
+      - push-branch
+      - create-pr
+      - pr-review:
+          on_verdict:
+            rework:
+              target: implementation
+
+  - id: triage
+    name: Task Triage
+    description: Validate and route tasks
+    phases:
+      - triage
+
+  - id: work-planner
+    name: Work Planner
+    description: Scan and enqueue ready tasks
+    phases:
+      - work-planning
+
+  - id: product-review
+    name: Product Review
+    description: Product Owner evaluates and creates tasks
+    phases:
+      - product-review
+
+  - id: task-reconciler
+    name: Task Reconciler
+    description: Fix stale state and unblock tasks
+    phases:
+      - reconciliation
+
+schedules:
+  - id: work-planner
+    cron: "*/5 * * * *"
+    workflow_ref: work-planner
+    enabled: true
+
+  - id: task-reconciler
+    cron: "2-59/10 * * * *"
+    workflow_ref: task-reconciler
+    enabled: true
+
+  - id: product-review
+    cron: "*/30 * * * *"
+    workflow_ref: product-review
+    enabled: true
+
+  - id: sync-main
+    cron: "*/5 * * * *"
+    workflow_ref: sync-main
+    enabled: true

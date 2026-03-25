@@ -1,0 +1,187 @@
+tools_allowlist:
+  - npm
+  - npx
+  - node
+  - gh
+  - git
+  - pnpm
+
+mcp_servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+agents:
+  default:
+    model: claude-haiku-4-5
+    tool: claude
+
+  # Default implementer (Claude Haiku — fast, cheap, good for most tasks)
+  implementer:
+    system_prompt: &impl_prompt |
+      You implement code changes for a TypeScript monorepo.
+      Use context7 MCP to look up current API signatures.
+      Write clean, type-safe code. Follow existing patterns.
+      Run build before committing.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  # Gemini variant
+  gemini-implementer:
+    system_prompt: *impl_prompt
+    model: gemini-2.5-pro
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  # MiniMax variant (cheapest)
+  minimax-implementer:
+    system_prompt: *impl_prompt
+    model: minimax/MiniMax-M2.7
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  # Kimi variant
+  kimi-implementer:
+    system_prompt: *impl_prompt
+    model: kimi-code/kimi-for-coding
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  # High-complexity implementer (Claude Opus — expensive, thorough)
+  opus-implementer:
+    system_prompt: |
+      You implement complex architectural changes for a TypeScript monorepo.
+      Use context7 MCP and sequential-thinking for complex decisions.
+      Think through edge cases. Write comprehensive tests.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  reviewer:
+    system_prompt: |
+      Review and merge PRs. Check CI, read diff, verify acceptance criteria.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+  triager:
+    system_prompt: |
+      Route tasks to the right implementation workflow based on complexity.
+
+      | Complexity | Type    | workflow_ref      |
+      |------------|---------|-------------------|
+      | low        | any     | standard-kimi     |
+      | medium     | feature | standard          |
+      | medium     | bugfix  | quick-fix         |
+      | medium     | chore   | standard-minimax  |
+      | high       | any     | standard          |
+      | critical   | any     | standard-opus     |
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+phases:
+  implementation:
+    mode: agent
+    agent: implementer
+    directive: Implement the task.
+    capabilities:
+      mutates_state: true
+
+  gemini-implementation:
+    mode: agent
+    agent: gemini-implementer
+    directive: Implement the task.
+    runtime:
+      fallback_models:
+        - claude-haiku-4-5
+    capabilities:
+      mutates_state: true
+
+  minimax-implementation:
+    mode: agent
+    agent: minimax-implementer
+    directive: Implement the task.
+    runtime:
+      fallback_models:
+        - claude-haiku-4-5
+    capabilities:
+      mutates_state: true
+
+  kimi-implementation:
+    mode: agent
+    agent: kimi-implementer
+    directive: Implement the task.
+    runtime:
+      fallback_models:
+        - claude-haiku-4-5
+    capabilities:
+      mutates_state: true
+
+  opus-implementation:
+    mode: agent
+    agent: opus-implementer
+    directive: Implement the task thoroughly. Think through edge cases.
+    capabilities:
+      mutates_state: true
+
+  push-branch:
+    mode: command
+    command:
+      program: git
+      args: ["push", "-u", "origin", "HEAD"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  create-pr:
+    mode: command
+    command:
+      program: gh
+      args: ["pr", "create", "--fill", "--base", "main"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  pr-review:
+    mode: agent
+    agent: reviewer
+    directive: Review the PR. Merge or request changes.
+
+  triage:
+    mode: agent
+    agent: triager
+    directive: Route the task to the right model/workflow.
+    capabilities:
+      mutates_state: true
+
+workflows:
+  - id: standard
+    name: Standard (Claude Haiku)
+    phases: [implementation, push-branch, create-pr, pr-review]
+
+  - id: standard-gemini
+    name: Standard (Gemini)
+    phases: [gemini-implementation, push-branch, create-pr, pr-review]
+
+  - id: standard-minimax
+    name: Standard (MiniMax)
+    phases: [minimax-implementation, push-branch, create-pr, pr-review]
+
+  - id: standard-kimi
+    name: Standard (Kimi)
+    phases: [kimi-implementation, push-branch, create-pr, pr-review]
+
+  - id: standard-opus
+    name: Standard (Opus — Complex Tasks)
+    phases: [opus-implementation, push-branch, create-pr, pr-review]
+
+  - id: quick-fix
+    name: Quick Fix
+    phases: [implementation, push-branch, create-pr, pr-review]
+
+  - id: triage
+    name: Task Triage
+    phases: [triage]

@@ -1,0 +1,218 @@
+tools_allowlist:
+  - git
+  - gh
+  - ao
+  - node
+  - npx
+  - WebSearch
+  - WebFetch
+
+mcp_servers:
+  sequential-thinking:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+agents:
+  question-generator:
+    system_prompt: |
+      You scan the knowledge base and generate strategic questions
+      the org should be asking but isn't.
+
+      On each run:
+      1. Read ALL files in knowledge/ — products, architecture, competitive,
+         revenue, ideas, repos/
+      2. Read existing questions in knowledge/questions/ to avoid duplicates
+      3. Identify gaps, contradictions, risks, and blind spots:
+         - What assumptions might be wrong?
+         - What data are we missing for good decisions?
+         - What risks aren't we tracking?
+         - What competitors are doing that we haven't responded to?
+         - What products are stale — should we sunset or revive?
+         - Where are we spending effort with unclear ROI?
+         - What do our users actually want that we're not building?
+      4. Generate questions as .md files in knowledge/questions/
+
+      Each file uses YAML frontmatter: title, priority, status ("open"),
+      category, source_files, generated_by, generated_at.
+      Body: Context, What We Know, What We Don't Know,
+      Suggested Investigation, Answer (leave blank).
+
+      Generate 3-5 high-quality questions per run. Depth over breadth.
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao", "github", "sequential-thinking"]
+
+  action-extractor:
+    system_prompt: |
+      You review answered questions and extract concrete action items.
+
+      On each run:
+      1. Read knowledge/questions/ — look for status: answered
+      2. Read knowledge/actions/ to avoid duplicates
+      3. For each answered question, extract actionable next steps:
+         - What should we build, change, or stop doing?
+         - Who should own this action?
+         - What's the priority and urgency?
+         - What's the expected outcome?
+         - What dependencies exist?
+
+      Each action uses YAML frontmatter: title, priority, status ("proposed"),
+      effort, category, source_question, owner ("unassigned"), target_repos.
+      Body: Context, Scope, Dependencies, Success Criteria, Notes.
+
+      Generate thorough, specific actions. Vague actions are useless.
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao", "github", "sequential-thinking"]
+
+  decision-packager:
+    system_prompt: |
+      You prepare decision packages for founders to review.
+
+      1. Read knowledge/actions/ with status: proposed
+      2. Group by category and priority
+      3. For each action, create a summary:
+         - One-line description
+         - Why it matters (revenue or risk)
+         - Effort estimate
+         - What happens if we don't do it
+         - Recommended decision (approve/reject/defer)
+      4. Write to knowledge/decisions/pending/<date>-batch.md
+
+      Format each action as:
+      ## [action-title]
+      **Recommendation:** approve / reject / defer
+      **Why:** one sentence
+      **Effort:** small/medium/large
+      **Revenue impact:** direct/indirect/none
+      **Decision:** _pending_
+
+      Make it trivially easy to scan and decide in 5 minutes.
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao", "sequential-thinking"]
+
+  decision-processor:
+    system_prompt: |
+      You process founder decisions and update action statuses.
+
+      1. Read knowledge/decisions/pending/ for processed packages
+      2. For each "approved" action: update status to "approved"
+      3. For each "rejected": update to "rejected"
+      4. For each "defer": update to "deferred"
+      5. Move processed packages to knowledge/decisions/completed/
+      6. Update knowledge/actions/backlog.md
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao"]
+
+  cross-repo-executor:
+    system_prompt: |
+      You execute approved actions by making real changes in target repos.
+
+      For each approved action:
+      1. Read target_repos and scope
+      2. Clone or pull the target repo
+      3. If repo has AO: create task via ao CLI
+      4. If no AO: create branch, make changes, push, create PR
+      5. Update action status to "in-progress"
+      6. Log to knowledge/actions/execution-log.md
+
+      SAFETY:
+      - Never execute non-approved actions
+      - For destructive actions, create PR but don't merge
+      - Check for existing tasks/PRs before creating duplicates
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers: ["ao", "github", "sequential-thinking"]
+
+phases:
+  generate-questions:
+    mode: agent
+    agent: question-generator
+    directive: |
+      Scan the knowledge base. Generate 3-5 strategic questions.
+      Avoid duplicates with existing questions.
+    capabilities:
+      mutates_state: true
+
+  extract-actions:
+    mode: agent
+    agent: action-extractor
+    directive: |
+      Review answered questions. Extract concrete action items
+      with owners, priorities, effort estimates, and dependencies.
+    capabilities:
+      mutates_state: true
+
+  package-decisions:
+    mode: agent
+    agent: decision-packager
+    directive: |
+      Batch proposed actions into a founder-ready decision package.
+      Make it scannable — approve/reject/defer in 5 minutes.
+    capabilities:
+      mutates_state: true
+
+  process-decisions:
+    mode: agent
+    agent: decision-processor
+    directive: |
+      Process founder decisions. Update action statuses.
+      Move processed packages to completed/.
+    capabilities:
+      mutates_state: true
+
+  execute-actions:
+    mode: agent
+    agent: cross-repo-executor
+    directive: |
+      Execute approved actions in target repos.
+      Create tasks or PRs as appropriate.
+    capabilities:
+      mutates_state: true
+
+workflows:
+  - id: generate-questions
+    name: Generate Questions
+    description: Scan knowledge base, generate strategic questions
+    phases:
+      - generate-questions
+
+  - id: extract-actions
+    name: Extract Actions
+    description: Turn answered questions into action items
+    phases:
+      - extract-actions
+
+  - id: decision-pipeline
+    name: Decision Pipeline
+    description: Package → Process → Execute decisions
+    phases:
+      - package-decisions
+
+  - id: process-decisions
+    name: Process Decisions
+    description: Update action statuses from founder decisions
+    phases:
+      - process-decisions
+
+  - id: cross-repo-execute
+    name: Cross-Repo Execute
+    description: Execute approved actions in target repos
+    phases:
+      - execute-actions
+
+schedules:
+  - id: generate-questions
+    cron: "0 9 * * *"          # Daily at 9 AM
+    workflow_ref: generate-questions
+    enabled: true
+
+  - id: decision-pipeline
+    cron: "0 8 * * 1"          # Monday at 8 AM
+    workflow_ref: decision-pipeline
+    enabled: true

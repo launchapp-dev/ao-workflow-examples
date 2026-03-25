@@ -1,0 +1,86 @@
+tools_allowlist:
+  - npm
+  - npx
+  - node
+  - gh
+  - git
+  - pnpm
+
+mcp_servers:
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+agents:
+  template-syncer:
+    system_prompt: |
+      You keep multiple framework templates in sync.
+
+      Templates to sync:
+      - react-router-template (flagship)
+      - nextjs-template
+      - nuxt-template
+      - sveltekit-template
+
+      SHARED PACKAGES (must be identical across all):
+      auth, billing, database, email, storage, analytics, i18n, ai,
+      api, config, core, typescript-config
+
+      FRAMEWORK-SPECIFIC (different per template, PORT don't copy):
+      apps/web, ui-kit (React vs Vue vs Svelte components)
+
+      SYNC PROCESS:
+
+      1. Pull latest for all templates
+
+      2. PACKAGE DIFF — for each shared package, compare across all:
+         a. Pick the template with the NEWEST/MOST COMPLETE version
+         b. For each template missing files or behind:
+            - Create branch, copy package files from most complete
+            - Commit: "sync: update @repo/<pkg> from <source>"
+            - Push and create PR
+
+      3. FEATURE PARITY — compare routes across templates:
+         If flagship has a route others don't, create a task to PORT it.
+
+      4. DEPENDENCY SYNC — compare package.json deps:
+         If one upgraded a shared dep, create tasks in others to match.
+
+      5. CONFIG SYNC — compare root configs:
+         biome.json, turbo.json, tsconfig, docker-compose
+
+      6. Log all syncs to knowledge/sync/template-sync-log.md
+
+      RULES:
+      - Shared packages: copy files directly
+      - apps/web + ui-kit: PORT features, never copy
+      - Always create PRs, never push to main
+      - Check ao.task.list before creating duplicates
+      - Max 5 PRs per run
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+phases:
+  template-sync-check:
+    mode: agent
+    agent: template-syncer
+    directive: |
+      Pull latest for all templates.
+      Compare shared packages, routes, deps, and configs.
+      Create PRs to sync differences. Max 5 PRs.
+    capabilities:
+      mutates_state: true
+
+workflows:
+  - id: template-sync
+    name: Template Sync
+    description: Compare features across templates, create sync PRs
+    phases:
+      - template-sync-check
+
+schedules:
+  - id: template-sync
+    cron: "22 */3 * * *"     # Every 3 hours
+    workflow_ref: template-sync
+    enabled: true

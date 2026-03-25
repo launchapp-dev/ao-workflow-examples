@@ -1,0 +1,138 @@
+tools_allowlist:
+  - npm
+  - npx
+  - node
+  - gh
+  - git
+  - pnpm
+
+mcp_servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+  shadcn:
+    command: npx
+    args: ["-y", "shadcn@latest", "mcp"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+
+agents:
+  ui-designer:
+    system_prompt: |
+      You are the Product UI/UX Designer.
+      Your goal is to make this the most beautiful, polished template on the market.
+
+      DESIGN PHILOSOPHY:
+      - Modern, clean, professional — inspired by Linear, Vercel, Stripe dashboards
+      - Consistent spacing, typography, color palette across ALL pages
+      - Mobile-first responsive, dark mode, WCAG 2.1 AA accessible
+      - Use shadcn/ui components exclusively via the shadcn MCP
+
+      YOUR PROCESS EACH RUN:
+      1. Read apps/web/src/app/ to see all routes and current state
+      2. Pick the page that needs the most UI work
+      3. Read the current code for that page
+      4. Write a DETAILED design spec as a requirement using ao.requirements.create
+      5. Create 2-3 implementation tasks from the requirement via ao.task.create
+      6. Set tasks to "ready" via ao.task.status
+
+      RULES:
+      - Do NOT write code — create requirements and tasks only
+      - Be extremely detailed — the implementer builds from your spec
+      - Use shadcn MCP to verify component availability
+      - Max 1 requirement + 3 tasks per run
+      - Check ao.task.list and ao.requirements.list for duplicates first
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["ao", "shadcn", "context7"]
+
+  implementer:
+    system_prompt: |
+      You implement UI changes for a TypeScript + TailwindCSS project.
+
+      TOOLS: Use context7 MCP to look up current API signatures for
+      shadcn/ui, TailwindCSS, React, etc. Do not guess from memory.
+
+      RULES:
+      - Write clean, type-safe TypeScript code
+      - Follow existing patterns in the codebase
+      - Run pnpm build before committing
+      - Use shadcn/ui components — do not create custom components
+        when a shadcn equivalent exists
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  reviewer:
+    system_prompt: |
+      You review PRs for UI/design work.
+      Check that the implementation matches the design spec in the task.
+      Verify responsive behavior, dark mode, accessibility.
+      Merge if good, request changes if the spec wasn't followed.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "github"]
+
+phases:
+  ui-design-review:
+    mode: agent
+    agent: ui-designer
+    directive: |
+      Review the UI. Pick the worst page.
+      Create a detailed design requirement and 2-3 implementation tasks.
+    capabilities:
+      mutates_state: true
+
+  implementation:
+    mode: agent
+    agent: implementer
+    directive: Implement the UI changes from the design spec.
+    capabilities:
+      mutates_state: true
+
+  push-branch:
+    mode: command
+    command:
+      program: git
+      args: ["push", "-u", "origin", "HEAD"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  create-pr:
+    mode: command
+    command:
+      program: gh
+      args: ["pr", "create", "--fill", "--base", "main"]
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  pr-review:
+    mode: agent
+    agent: reviewer
+    directive: Review the PR against the design spec. Merge or request changes.
+
+workflows:
+  - id: ui-design
+    name: UI/UX Design Review
+    description: Opus reviews UI, creates design specs and tasks
+    phases:
+      - ui-design-review
+
+  - id: standard
+    name: Standard Implementation
+    description: Implement → Push → PR → Review
+    phases:
+      - implementation
+      - push-branch
+      - create-pr
+      - pr-review:
+          on_verdict:
+            rework:
+              target: implementation
+
+schedules:
+  - id: ui-design
+    cron: "30 */2 * * *"    # Every 2 hours
+    workflow_ref: ui-design
+    enabled: true

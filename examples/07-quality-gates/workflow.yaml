@@ -1,0 +1,238 @@
+tools_allowlist:
+  - npm
+  - npx
+  - node
+  - gh
+  - git
+  - pnpm
+  - WebSearch
+  - WebFetch
+
+mcp_servers:
+  context7:
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+  package-version:
+    command: npx
+    args: ["-y", "mcp-package-version"]
+  sequential-thinking:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+  playwright:
+    command: npx
+    args: ["-y", "@playwright/mcp", "--headless"]
+
+agents:
+  architect:
+    system_prompt: |
+      You are the Software Architect. Focus on structural integrity.
+
+      1. VERIFY THE APP RUNS (do this FIRST):
+         - Run: pnpm install
+         - Run: pnpm build — if it fails, create a CRITICAL bugfix task
+         - Run: pnpm dev — verify it starts without crash
+      2. Scan the dependency graph:
+         - Read package.json in each package. Build the tree.
+         - Flag circular dependencies and over-coupling.
+      3. Check package boundaries and clean public APIs.
+      4. Check build config (turbo.json, tsconfig references).
+      5. Check Dockerfile and CI/CD.
+      6. Flag anti-patterns: barrel re-exports, runtime type assertions.
+
+      Create tasks for structural issues found.
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: ["ao", "context7", "sequential-thinking"]
+
+  auditor:
+    system_prompt: |
+      You are the QA and Security Auditor.
+
+      BUILD & TYPE SAFETY:
+      1. Run pnpm build — does it succeed?
+      2. Run pnpm lint — violations?
+      3. Check for "any" type usage that could be tightened.
+
+      SECURITY:
+      1. Scan for hardcoded secrets in .ts/.tsx files.
+      2. Check auth: CSRF protection, httpOnly/secure cookies.
+      3. Check API: route authentication, input validation.
+      4. Check .gitignore covers sensitive files.
+      5. Look for injection vectors: eval, innerHTML, SQL.
+      6. Run pnpm audit if available.
+
+      Create tasks for every issue with specific file paths.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "package-version", "sequential-thinking"]
+
+  docs-writer:
+    system_prompt: |
+      You keep documentation in sync with the codebase.
+
+      1. CLAUDE.md — does it reflect current packages and conventions?
+      2. .env.example — does it include ALL env vars used in code?
+      3. README.md — is it useful for someone cloning the project?
+      4. Package exports — are they clear and well-organized?
+      5. Route documentation — are routes documented anywhere?
+
+      Use context7 MCP to verify API signatures in documentation.
+      Create tasks for gaps found.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "context7"]
+
+  devops:
+    system_prompt: |
+      You check deployment readiness.
+
+      1. Dockerfile: pinned Node version, minimal production stage
+      2. Infrastructure scripts: error handling, correctness
+      3. CI/CD: GitHub Actions exist with build + lint + type-check
+      4. Root package.json has deployment-ready scripts
+    model: claude-haiku-4-5
+    tool: claude
+
+  smoke-tester:
+    system_prompt: |
+      You verify the app actually runs.
+
+      1. Run pnpm install && pnpm build
+      2. Start dev server: pnpm dev (background)
+      3. Use Playwright to navigate to key pages:
+         - / (landing)
+         - /auth/login
+         - /dashboard (if accessible)
+      4. Check for: 200 status, no console errors, page renders
+      5. Kill the dev server
+      6. Report any failures as critical tasks
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "playwright"]
+
+  researcher:
+    system_prompt: |
+      You find improvements, package updates, and new integrations.
+
+      1. Use package-version MCP to check latest stable versions of key deps.
+      2. Use context7 MCP to get current documentation for libraries.
+      3. Use WebSearch for broader research (new packages, security advisories).
+      4. Compare findings against current versions.
+      5. Create tasks for valuable improvements.
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: ["ao", "context7", "package-version"]
+
+phases:
+  architecture-audit:
+    mode: agent
+    agent: architect
+    directive: |
+      Audit the monorepo structure:
+      1. Map the dependency graph from all package.json files
+      2. Check for circular dependencies
+      3. Verify Dockerfile copies all required packages
+      4. Check turbo.json and tsconfig consistency
+      5. Flag over-coupled packages (4+ sibling imports)
+
+  qa-security-audit:
+    mode: agent
+    agent: auditor
+    directive: |
+      Run QA and security audit:
+      1. pnpm install → pnpm build (critical bugfix if fails)
+      2. pnpm lint (report violations)
+      3. Scan for hardcoded secrets
+      4. Check auth and API security
+      5. Check .gitignore coverage
+
+  docs-audit:
+    mode: agent
+    agent: docs-writer
+    directive: |
+      Audit documentation sync:
+      1. Compare CLAUDE.md against actual packages/
+      2. Compare .env.example against env var usage in code
+      3. Check README quality
+      4. Check package export surfaces
+
+  devops-audit:
+    mode: agent
+    agent: devops
+    directive: |
+      Audit deployment readiness:
+      1. Check Dockerfile quality
+      2. Check infrastructure scripts
+      3. Verify CI/CD exists
+      4. Check deployment scripts in package.json
+
+  smoke-test:
+    mode: agent
+    agent: smoke-tester
+    directive: |
+      Start dev server, verify key pages load with Playwright.
+      Report any failures as critical tasks.
+
+  research-improvements:
+    mode: agent
+    agent: researcher
+    directive: |
+      Find package updates and new integrations.
+      Check latest versions, research best practices.
+      Create tasks for valuable improvements.
+
+workflows:
+  - id: architecture-audit
+    name: Architecture Audit
+    phases: [architecture-audit]
+
+  - id: qa-security-audit
+    name: QA & Security Audit
+    phases: [qa-security-audit]
+
+  - id: docs-audit
+    name: Documentation Audit
+    phases: [docs-audit]
+
+  - id: devops-audit
+    name: DevOps Audit
+    phases: [devops-audit]
+
+  - id: smoke-test
+    name: Smoke Test
+    phases: [smoke-test]
+
+  - id: research-scout
+    name: Research Scout
+    phases: [research-improvements]
+
+schedules:
+  - id: qa-security-audit
+    cron: "15 */2 * * *"      # Every 2 hours
+    workflow_ref: qa-security-audit
+    enabled: true
+
+  - id: architecture-audit
+    cron: "45 */3 * * *"      # Every 3 hours
+    workflow_ref: architecture-audit
+    enabled: true
+
+  - id: docs-audit
+    cron: "20 */3 * * *"      # Every 3 hours
+    workflow_ref: docs-audit
+    enabled: true
+
+  - id: devops-audit
+    cron: "30 */6 * * *"      # Every 6 hours
+    workflow_ref: devops-audit
+    enabled: true
+
+  - id: smoke-test
+    cron: "0 * * * *"         # Every hour
+    workflow_ref: smoke-test
+    enabled: true
+
+  - id: research-scout
+    cron: "37 */1 * * *"      # Every hour
+    workflow_ref: research-scout
+    enabled: true

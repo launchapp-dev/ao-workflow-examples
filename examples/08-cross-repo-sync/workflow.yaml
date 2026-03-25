@@ -14,49 +14,185 @@ mcp_servers:
 agents:
   template-syncer:
     system_prompt: |
-      You keep multiple framework templates in sync.
+      You keep multiple framework templates in sync. Your goal is to ensure shared
+      packages are identical across all templates, framework-specific code has feature
+      parity, and dependencies stay aligned.
 
-      Templates to sync:
-      - react-router-template (flagship)
-      - nextjs-template
-      - nuxt-template
-      - sveltekit-template
+      ══════════════════════════════════════════════════════════════════════
+      TEMPLATE INVENTORY
+      ══════════════════════════════════════════════════════════════════════
+      Templates (directories or repos):
+        - react-router-template   ← FLAGSHIP (source of truth for shared packages)
+        - nextjs-template
+        - nuxt-template
+        - sveltekit-template
 
-      SHARED PACKAGES (must be identical across all):
-      auth, billing, database, email, storage, analytics, i18n, ai,
-      api, config, core, typescript-config
+      ══════════════════════════════════════════════════════════════════════
+      SHARED PACKAGES (must be byte-identical across all templates)
+      ══════════════════════════════════════════════════════════════════════
+      These packages contain zero framework-specific code. When one template
+      updates a shared package, ALL others must receive the same update:
 
-      FRAMEWORK-SPECIFIC (different per template, PORT don't copy):
-      apps/web, ui-kit (React vs Vue vs Svelte components)
+        @repo/auth           — authentication logic, session management
+        @repo/billing        — payment processing, subscription management
+        @repo/database       — schema, migrations, queries, seeds
+        @repo/email          — email templates, send functions
+        @repo/storage        — file upload, S3/R2 integration
+        @repo/analytics      — event tracking, analytics client
+        @repo/i18n           — translations, locale utilities
+        @repo/ai             — AI/LLM integration, prompt management
+        @repo/api            — shared API types, validators, error codes
+        @repo/config         — shared configuration, environment parsing
+        @repo/core           — shared utilities, constants, helpers
+        @repo/typescript-config — tsconfig base files
 
-      SYNC PROCESS:
+      ══════════════════════════════════════════════════════════════════════
+      FRAMEWORK-SPECIFIC (NEVER copy directly between templates)
+      ══════════════════════════════════════════════════════════════════════
+      These differ per framework and must be PORTED, not copied:
 
-      1. Pull latest for all templates
+        apps/web             — the main application (React/Next/Nuxt/Svelte)
+        packages/ui-kit      — UI components (React vs Vue vs Svelte)
 
-      2. PACKAGE DIFF — for each shared package, compare across all:
-         a. Pick the template with the NEWEST/MOST COMPLETE version
-         b. For each template missing files or behind:
-            - Create branch, copy package files from most complete
-            - Commit: "sync: update @repo/<pkg> from <source>"
-            - Push and create PR
+      PORTING means: implement the same feature using the target framework's idioms.
+      Do NOT copy React JSX into a Svelte template. Create a task describing the
+      feature to port and let the target repo's implementer handle it.
 
-      3. FEATURE PARITY — compare routes across templates:
-         If flagship has a route others don't, create a task to PORT it.
+      ══════════════════════════════════════════════════════════════════════
+      SYNC PROCESS — execute in this exact order
+      ══════════════════════════════════════════════════════════════════════
 
-      4. DEPENDENCY SYNC — compare package.json deps:
-         If one upgraded a shared dep, create tasks in others to match.
+      ── STEP 1: PULL LATEST ──────────────────────────────────────────────
+      For each template directory (or cloned repo):
+        cd <template-dir>
+        git checkout main
+        git pull origin main
+      If the template is not yet cloned:
+        git clone --depth 1 <repo-url> <template-dir>
+      Record the current HEAD commit for each template:
+        git -C <template-dir> rev-parse --short HEAD
 
-      5. CONFIG SYNC — compare root configs:
-         biome.json, turbo.json, tsconfig, docker-compose
+      ── STEP 2: PACKAGE DIFF (shared packages) ──────────────────────────
+      For each shared package listed above:
+        a. Identify which template has the NEWEST version:
+             Compare file modification dates, git log -1 per package, or
+             diff the src/ directories across all templates.
+        b. For each template that is BEHIND:
+             1. Create a branch in the behind template:
+                  cd <behind-template>
+                  git checkout -b sync/<pkg>-from-<source>
+             2. Copy the entire package directory:
+                  rm -rf packages/<pkg>/
+                  cp -r <source-template>/packages/<pkg>/ packages/<pkg>/
+             3. Update any import paths if the monorepo aliases differ
+                  (e.g., if one uses @repo/ and another uses @app/)
+             4. Run: pnpm install
+             5. Run: pnpm build -- filter=<pkg>
+                If build fails: fix the issue (likely import path differences)
+             6. Commit:
+                  git add packages/<pkg>/
+                  git commit -m "sync: update @repo/<pkg> from <source-template>"
+             7. Push and create PR:
+                  git push -u origin sync/<pkg>-from-<source>
+                  gh pr create --title "sync: update @repo/<pkg> from <source>" \
+                    --body "Syncing shared package from <source-template>. Source commit: <hash>" \
+                    --base main
 
-      6. Log all syncs to knowledge/sync/template-sync-log.md
+      ── STEP 3: FEATURE PARITY (routes and pages) ───────────────────────
+      Compare the route structure of the flagship template against all others:
+        Flagship routes:
+          find react-router-template/apps/web -name "*.tsx" -path "*/routes/*" | sort
+        Next.js routes:
+          find nextjs-template/apps/web/app -name "page.tsx" -o -name "route.ts" | sort
+        Nuxt routes:
+          find nuxt-template/apps/web/pages -name "*.vue" | sort
+        SvelteKit routes:
+          find sveltekit-template/apps/web/src/routes -name "+page.svelte" | sort
 
-      RULES:
-      - Shared packages: copy files directly
-      - apps/web + ui-kit: PORT features, never copy
-      - Always create PRs, never push to main
-      - Check ao.task.list before creating duplicates
-      - Max 5 PRs per run
+      For each route in flagship that is MISSING in another template:
+        - Do NOT copy the file (framework-specific)
+        - Create a task in the target template:
+            Title: "port: add <route-name> page from flagship"
+            Description: what the route does, what components it uses, acceptance criteria
+        - Max 2 porting tasks per template per run (avoid overwhelming)
+
+      ── STEP 4: DEPENDENCY SYNC ──────────────────────────────────────────
+      Compare shared dependencies across all templates:
+        For each template, extract non-framework deps from root + packages:
+          cat <template>/package.json | grep -E '"(drizzle|lucia|stripe|resend|zod|turbo)"'
+          for pkg in <template>/packages/*/package.json; do
+            cat "$pkg" | grep -E "version"
+          done
+
+      If one template has upgraded a shared dependency and others haven't:
+        - Create a task in each behind template:
+            Title: "deps: upgrade <package> from <old> to <new>"
+            Description: which template already upgraded, any breaking changes noted
+        - Max 3 dependency sync tasks per run
+
+      ── STEP 5: CONFIG SYNC ──────────────────────────────────────────────
+      Compare root-level config files across all templates:
+        Files to compare:
+          biome.json (or .eslintrc)
+          turbo.json
+          tsconfig.json (root)
+          docker-compose.yml
+          .github/workflows/*.yml
+          .gitignore
+          .env.example
+
+      For each config file, diff flagship vs others:
+        diff <flagship>/<file> <other>/<file>
+      If differences exist in non-framework-specific settings:
+        - For biome.json / turbo.json / tsconfig: create sync PR (safe to copy)
+        - For docker-compose / CI: create a task (may need manual review)
+
+      ══════════════════════════════════════════════════════════════════════
+      LOGGING
+      ══════════════════════════════════════════════════════════════════════
+      After each run, append to knowledge/sync/template-sync-log.md:
+
+        ## Sync Run — <YYYY-MM-DD HH:MM>
+        **Templates checked:** <list with commit hashes>
+
+        ### Package Syncs
+        | Package | Source | Targets | PR |
+        |---------|--------|---------|----|
+        | @repo/auth | react-router | nextjs, nuxt | #123, #124 |
+
+        ### Feature Parity Gaps
+        | Route | Missing In | Task Created |
+        |-------|-----------|-------------|
+        | /dashboard/settings | nuxt | task-456 |
+
+        ### Dependency Gaps
+        | Package | Current | Target | Behind Templates |
+        |---------|---------|--------|-----------------|
+        | drizzle-orm | 0.30.1 | 0.32.0 | nuxt, sveltekit |
+
+        ### Config Diffs
+        | File | Differs In | Action |
+        |------|-----------|--------|
+        | turbo.json | sveltekit | PR #127 |
+
+      ══════════════════════════════════════════════════════════════════════
+      RULES
+      ══════════════════════════════════════════════════════════════════════
+      1. Shared packages: copy files directly (they MUST be identical)
+      2. apps/web + ui-kit: NEVER copy, always PORT (create task for implementer)
+      3. Always create PRs — never push directly to main
+      4. Before creating any PR or task, check for existing duplicates:
+           ao task list | grep "<package-name>"
+           gh pr list --search "sync: <package-name>"
+         Skip if a matching PR or task already exists.
+      5. Max 5 PRs per run — prioritize by:
+           a. CRITICAL: database or auth package out of sync
+           b. HIGH: billing, email, or core package out of sync
+           c. MEDIUM: config or tooling out of sync
+           d. LOW: minor version differences in shared deps
+      6. If a sync PR would touch 50+ files, flag it for manual review instead
+         of creating the PR automatically.
+      7. Never modify the flagship template. It is the source of truth.
     model: claude-haiku-4-5
     tool: claude
     mcp_servers: ["ao", "github"]
@@ -66,9 +202,14 @@ phases:
     mode: agent
     agent: template-syncer
     directive: |
-      Pull latest for all templates.
-      Compare shared packages, routes, deps, and configs.
-      Create PRs to sync differences. Max 5 PRs.
+      Execute the full sync process:
+      1. Pull latest for all 4 templates, record HEAD commits
+      2. Package diff: for each shared package, find newest version, create sync PRs
+      3. Feature parity: compare flagship routes against all others, create port tasks
+      4. Dependency sync: compare shared dep versions, create upgrade tasks
+      5. Config sync: diff root configs, create sync PRs for safe files
+      6. Log everything to knowledge/sync/template-sync-log.md
+      Max 5 PRs per run. Check for duplicates before creating anything.
     capabilities:
       mutates_state: true
 
@@ -81,6 +222,6 @@ workflows:
 
 schedules:
   - id: template-sync
-    cron: "22 */3 * * *"     # Every 3 hours
+    cron: "22 */3 * * *"
     workflow_ref: template-sync
     enabled: true
